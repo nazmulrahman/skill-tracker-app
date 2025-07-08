@@ -336,7 +336,6 @@ const SkillTrackerProvider = ({ children }) => {
     const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null); // Firebase UID
     const [isAuthReady, setIsAuthReady] = useState(false); // To track if auth state is resolved
-    const [loggedInUser, setLoggedInUser] = useState(null); // New state for the authenticated user
 
     // --- START: Firebase Configuration for Local Development ---
     // This is the configuration you provided.
@@ -365,8 +364,6 @@ const SkillTrackerProvider = ({ children }) => {
             setAuth(firebaseAuth);
 
             const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
-                console.log("Auth state changed. User:", user); // Log auth state
-                setLoggedInUser(user); // Set the user object directly
                 if (user) {
                     setUserId(user.uid);
                     // The role will be set by handleLogin based on what the user selects.
@@ -398,16 +395,12 @@ const SkillTrackerProvider = ({ children }) => {
 
     // Fetch employees from Firestore
     useEffect(() => {
-        // Only proceed if db, currentAppId are available, and auth state is ready
-        if (!db || !currentAppId || !isAuthReady) {
-            return;
-        }
-
-        // If there's no loggedInUser, clear the lists and return.
-        // This explicitly handles the unauthenticated state and ensures lists are empty on logout.
-        if (!loggedInUser) {
-            setEmployees([]);
-            setArchivedEmployees([]);
+        // Only proceed if db, currentAppId are available, and there's an authenticated user
+        // auth.currentUser is a more reliable check than userId alone for Firestore rules
+        if (!db || !currentAppId || !isAuthReady || !auth.currentUser) {
+            // If we are unauthenticated, ensure data is cleared to prevent stale display
+            if (employees.length > 0) setEmployees([]);
+            if (archivedEmployees.length > 0) setArchivedEmployees([]);
             return;
         }
 
@@ -456,7 +449,7 @@ const SkillTrackerProvider = ({ children }) => {
             unsubscribeEmployees();
             unsubscribeArchived();
         }; // Cleanup listeners
-    }, [db, isAuthReady, currentAppId, loggedInUser]); // Now depends on loggedInUser
+    }, [db, isAuthReady, auth, currentAppId]); // Dependencies for re-running fetch
 
     // Modified handleLogin to use Firebase Authentication for Admin, and Firestore for Employee
     const handleLogin = useCallback(async (role, username, password) => {
@@ -479,9 +472,32 @@ const SkillTrackerProvider = ({ children }) => {
                 setCurrentUserRole('admin');
                 setCurrentPage('admin');
             } else if (role === 'employee') {
-                // For employee login, we now just set the role and page to show the list
-                setCurrentUserRole('employee_selection'); // A new temporary role to show employee list
-                setCurrentPage('employee-selection'); // A new page to show the list
+                // Employee login uses custom credentials stored in Firestore
+                // Ensure userId is available (from anonymous or custom token auth) for the query
+                if (!userId) {
+                    alert("User not authenticated for employee login. Please ensure anonymous sign-in is enabled.");
+                    return;
+                }
+
+                // Query by username instead of name for employee login
+                const q = query(collection(db, `artifacts/${currentAppId}/public/data/employees`), where("username", "==", username));
+                const querySnapshot = await getDocs(q);
+
+                if (querySnapshot.empty) {
+                    alert("Employee not found or incorrect username.");
+                    return;
+                }
+
+                const employeeDoc = querySnapshot.docs[0];
+                const employeeData = employeeDoc.data();
+
+                if (verifyPassword(password, employeeData.hashedPassword)) {
+                    setCurrentUserRole('employee');
+                    setCurrentEmployeeId(employeeDoc.id);
+                    setCurrentPage('my-progress');
+                } else {
+                    alert("Incorrect password for employee.");
+                }
             }
         } catch (error) {
             console.error("Login failed:", error.message);
@@ -491,13 +507,6 @@ const SkillTrackerProvider = ({ children }) => {
         }
     }, [auth, db, currentAppId, isAuthReady, userId]); // Added isAuthReady and userId to dependencies
 
-    // New function for direct employee login (without password)
-    const handleDirectEmployeeLogin = useCallback((employeeId) => {
-        setCurrentUserRole('employee');
-        setCurrentEmployeeId(employeeId);
-        setCurrentPage('my-progress');
-    }, []);
-
     const handleLogout = useCallback(async () => {
         try {
             if (auth) {
@@ -506,10 +515,9 @@ const SkillTrackerProvider = ({ children }) => {
             setCurrentUserRole(null);
             setCurrentEmployeeId(null);
             setCurrentPage('login');
-            // Do NOT clear employee data immediately on logout, let onSnapshot handle it
-            // This is crucial for the re-login persistence fix
-            // setEmployees([]); 
-            // setArchivedEmployees([]);
+            // Clear employee data immediately on logout to prevent stale displays and potential errors
+            setEmployees([]);
+            setArchivedEmployees([]);
         } catch (error) {
             console.error("Logout failed:", error.message);
             alert(`Logout failed: ${error.message}`);
@@ -720,8 +728,7 @@ const SkillTrackerProvider = ({ children }) => {
         archiveEmployee, // New function for archiving
         restoreEmployee, // New function for restoring
         deleteEmployeePermanently, // New function for permanent deletion
-        isAuthReady, // Expose auth readiness
-        handleDirectEmployeeLogin // New function for direct employee login
+        isAuthReady // Expose auth readiness
     };
 
     // Only render children when Firebase is initialized and auth state is ready
@@ -744,16 +751,13 @@ const SkillTrackerProvider = ({ children }) => {
 
 // LoginPage Component
 const LoginPage = () => {
-    const { handleLogin, handleDirectEmployeeLogin, employees, setCurrentPage } = useSkillTracker(); // Added employees and setCurrentPage
+    const { handleLogin } = useSkillTracker();
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [selectedRole, setSelectedRole] = useState(''); // To hold the role selected by the user
 
     const handleLoginClick = (role) => {
         setSelectedRole(role);
-        if (role === 'employee') {
-            setCurrentPage('employee-selection'); // Directly go to employee selection page
-        }
     };
 
     const handleAuthenticate = (e) => {
@@ -764,44 +768,6 @@ const LoginPage = () => {
             alert('Please enter username, password, and select a role.');
         }
     };
-
-    if (selectedRole === 'employee') {
-        return (
-            <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-                <div className="max-w-md w-full space-y-8 p-10 bg-white rounded-lg shadow-xl">
-                    <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-                        Select Your Employee Profile
-                    </h2>
-                    <div className="space-y-4 max-h-80 overflow-y-auto">
-                        {employees.length === 0 ? (
-                            <p className="text-center text-gray-500">No employee profiles available. Please login as Admin to add employees.</p>
-                        ) : (
-                            employees.map(emp => (
-                                <div key={emp.id} className="flex justify-between items-center p-3 border border-gray-200 rounded-md shadow-sm bg-gray-50">
-                                    <span className="text-lg font-medium text-gray-800">{emp.fullName} ({emp.role})</span>
-                                    <button
-                                        onClick={() => handleDirectEmployeeLogin(emp.id)}
-                                        className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 text-sm"
-                                    >
-                                        Login
-                                    </button>
-                                </div>
-                            ))
-                        )}
-                    </div>
-                    <div className="text-center">
-                        <button
-                            type="button"
-                            onClick={() => setSelectedRole('')}
-                            className="font-medium text-indigo-600 hover:text-indigo-500"
-                        >
-                            Back to role selection
-                        </button>
-                    </div>
-                </div>
-            </div>
-        );
-    }
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
@@ -1137,7 +1103,7 @@ const TaskDetailModal = ({ isOpen, onClose, task, isAdminContext, onApproveTask,
     };
 
     return (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
                 <h2 className="text-2xl font-semibold text-gray-800 mb-4">Task Details: {task.name}</h2>
                 <div className="space-y-3 mb-6">
@@ -1903,7 +1869,7 @@ const ManageUsersPage = () => {
 
             {/* Add New Employee Section */}
             <div className="bg-white p-6 rounded-lg shadow mb-8">
-                <h2 className="2xl font-semibold text-gray-700 mb-4">Add New Employee</h2>
+                <h2 className="text-2xl font-semibold text-gray-700 mb-4">Add New Employee</h2>
                 <form onSubmit={handleAddEmployeeSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label htmlFor="new-employee-full-name" className="block text-sm font-medium text-gray-700">Full Name</label> {/* Updated label */}
@@ -2267,9 +2233,6 @@ const AppContent = () => {
                 )}
                 {currentPage === 'manage-users' && currentUserRole === 'admin' && (
                     <ManageUsersPage />
-                )}
-                {currentPage === 'employee-selection' && ( // New page for employee selection
-                    <LoginPage /> // Reusing LoginPage but it will render the employee selection part
                 )}
                 {(currentPage === 'employee-detail' || currentPage === 'my-progress') && employeeToDisplay && (
                     <EmployeeDetail
