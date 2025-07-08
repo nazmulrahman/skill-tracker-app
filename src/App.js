@@ -1,7 +1,18 @@
-// src/App.js - Consolidated React Application
+/* global __initial_auth_token, __app_id */
+// src/App.js - Consolidated React Application with Firebase Integration
 
 import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import Chart from 'chart.js/auto'; // Import Chart.js
+
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, getDocs, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, query, where } from 'firebase/firestore';
+
+
+// --- Global App ID for Local Development (ESLint Fix) ---
+// In Canvas, __app_id is provided globally. For local development, we define it here.
+const LOCAL_APP_ID = 'nyza-skill-tracker-local';
 
 // --- 0. CONSTANTS ---
 const MATRICES = {
@@ -82,6 +93,7 @@ const SKILLS_DATA = [
     }
 ];
 
+// Dummy data creation (will be replaced by Firebase data)
 const createDummyData = () => {
     const dummyEmployees = [
         {
@@ -89,8 +101,8 @@ const createDummyData = () => {
             name: 'Arnab (Dummy)',
             role: 'Robotics Software Engineer',
             timeAtRole: 2.1,
-            totalYearsInCompany: 2.1, // Initialize totalYearsInCompany
-            currentLevel: 'Junior Engineer', // Initialize currentLevel
+            totalYearsInCompany: 2.1,
+            currentLevel: 'Junior Engineer',
             skills: SKILLS_DATA.map(cat => ({
                 category: cat.category,
                 matrixCategory: cat.matrixCategory,
@@ -297,110 +309,223 @@ const useSkillTracker = () => {
 };
 
 const SkillTrackerProvider = ({ children }) => {
-    const [currentUserRole, setCurrentUserRole] = useState(() => localStorage.getItem('currentUserRole') || null);
-    const [employees, setEmployees] = useState(() => {
-        const savedEmployees = localStorage.getItem('employees');
-        if (savedEmployees) {
-            const loadedEmployees = JSON.parse(savedEmployees);
-            return loadedEmployees.map(emp => {
-                const calculated = calculateSkillScores(emp);
-                calculated.levelData = getLevelAndPMRating(calculated.totalScore);
-                calculated.bestFitRole = determineBestFitRole(emp, calculated);
-                // Ensure currentLevel and totalYearsInCompany are initialized if missing from old data
-                if (!emp.currentLevel) emp.currentLevel = getLevelAndPMRating(0).level; // Default to lowest level
-                if (emp.totalYearsInCompany === undefined) emp.totalYearsInCompany = emp.timeAtRole || 0;
-                return { ...emp, calculatedData: calculated };
+    const [currentUserRole, setCurrentUserRole] = useState(null); // No initial role, determined by Firebase Auth
+    const [employees, setEmployees] = useState([]);
+    const [currentEmployeeId, setCurrentEmployeeId] = useState(null);
+    const [currentPage, setCurrentPage] = useState('login'); // Start at login page
+
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null); // Firebase UID
+    const [isAuthReady, setIsAuthReady] = useState(false); // To track if auth state is resolved
+
+    // --- START: Firebase Configuration for Local Development ---
+    // This is the configuration you provided.
+    const firebaseConfig = {
+      apiKey: "AIzaSyBBer8TYgR0Fz5awRkq87XZZESvRRulXJg",
+      authDomain: "nyza-skill-tracker.firebaseapp.com",
+      projectId: "nyza-skill-tracker",
+      storageBucket: "nyza-skill-tracker.firebasestorage.app",
+      messagingSenderId: "68269769502",
+      appId: "1:68269769502:web:d16c21b6194aff4fba3f0f",
+      measurementId: "G-1TW5QSH7S5" // measurementId is optional for basic use
+    };
+
+    // Determine the actual appId to use (Canvas global or local constant)
+    const currentAppId = typeof __app_id !== 'undefined' ? __app_id : LOCAL_APP_ID;
+    // --- END: Firebase Configuration for Local Development ---
+
+    // Firebase Initialization and Auth State Listener
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestoreDb = getFirestore(app);
+            const firebaseAuth = getAuth(app);
+
+            setDb(firestoreDb);
+            setAuth(firebaseAuth);
+
+            const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    // In a real app, you'd fetch the user's role from a 'users' collection
+                    // For this demo, we'll set the role based on a hardcoded check or previous login
+                    // This will be set by the handleLogin function.
+                } else {
+                    // If no user is logged in, try to sign in with custom token or anonymously
+                    try {
+                        // __initial_auth_token is provided by Canvas. If running locally, it's undefined.
+                        // The /* global __initial_auth_token */ comment at the top handles ESLint.
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(firebaseAuth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(firebaseAuth);
+                        }
+                    } catch (anonError) {
+                        console.error("Anonymous or custom token sign-in failed:", anonError);
+                        // If even anonymous sign-in fails, userId will remain null
+                    }
+                    // Ensure userId is set even for anonymous users or if auth fails
+                    setUserId(firebaseAuth.currentUser?.uid || crypto.randomUUID()); 
+                }
+                setIsAuthReady(true); // Auth state is now determined
             });
+
+            return () => unsubscribe(); // Cleanup auth listener
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+            alert("Failed to initialize Firebase. Check console for details.");
         }
-        return []; // createDummyData(); // Uncomment to start with dummy data
-    });
-    const [currentEmployeeId, setCurrentEmployeeId] = useState(() => localStorage.getItem('currentEmployeeId') || null);
-    const [currentPage, setCurrentPage] = useState(() => localStorage.getItem('currentPage') || (currentUserRole ? 'admin' : 'login'));
+    }, []); // Run only once on component mount
 
-    useEffect(() => { localStorage.setItem('currentUserRole', currentUserRole); }, [currentUserRole]);
-    useEffect(() => { localStorage.setItem('employees', JSON.stringify(employees)); }, [employees]);
-    useEffect(() => { localStorage.setItem('currentEmployeeId', currentEmployeeId); }, [currentEmployeeId]);
-    useEffect(() => { localStorage.setItem('currentPage', currentPage); }, [currentPage]);
+    // Fetch employees from Firestore
+    useEffect(() => {
+        if (!db || !isAuthReady || !userId || !currentAppId) return; // Wait for Firebase, auth readiness, userId, and currentAppId
 
-    const handleLogin = useCallback((role) => {
-        setCurrentUserRole(role);
-        if (role === 'admin') {
-            setCurrentPage('admin');
-        } else {
-            if (employees.length > 0) {
-                setCurrentEmployeeId(employees[0].id);
-                setCurrentPage('my-progress');
-            } else {
-                alert("No employee data available. Please login as Admin to add employees.");
-                setCurrentUserRole(null);
-                setCurrentPage('login');
-            }
+        // We are storing employees in a public collection for simplicity in this demo
+        // Path: artifacts/{currentAppId}/public/data/employees
+        const employeesCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/employees`);
+        const q = query(employeesCollectionRef);
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedEmployees = snapshot.docs.map(doc => {
+                const data = doc.data();
+                const employee = {
+                    id: doc.id,
+                    ...data,
+                    // Ensure calculatedData is re-calculated on fetch
+                    calculatedData: calculateSkillScores({ id: doc.id, ...data })
+                };
+                // Ensure currentLevel and totalYearsInCompany are present for old data
+                if (!employee.currentLevel) employee.currentLevel = getLevelAndPMRating(0).level;
+                if (employee.totalYearsInCompany === undefined) employee.totalYearsInCompany = employee.timeAtRole || 0;
+                return employee;
+            });
+            setEmployees(fetchedEmployees);
+        }, (error) => {
+            console.error("Error fetching employees:", error);
+            alert("Error fetching employee data.");
+        });
+
+        return () => unsubscribe(); // Cleanup listener
+    }, [db, isAuthReady, userId, currentAppId]); // Dependencies for re-running fetch
+
+    // Modified handleLogin to use Firebase Authentication
+    const handleLogin = useCallback(async (role, email, password) => {
+        if (!auth) {
+            alert("Firebase Auth not initialized.");
+            return;
         }
-    }, [employees]);
-
-    const handleLogout = useCallback(() => {
-        setCurrentUserRole(null);
-        setCurrentEmployeeId(null);
-        setCurrentPage('login');
-        localStorage.removeItem('currentUserRole');
-        localStorage.removeItem('currentEmployeeId');
-        localStorage.removeItem('currentPage');
-    }, []);
-
-    const addEmployee = useCallback((name, role, timeAtRole) => {
-        const newEmployee = {
-            id: 'emp_' + Date.now(),
-            name: name,
-            role: role,
-            timeAtRole: timeAtRole,
-            totalYearsInCompany: timeAtRole, // Initialize totalYearsInCompany
-            currentLevel: getLevelAndPMRating(0).level, // New employees start at lowest level
-            skills: SKILLS_DATA.map(cat => ({
-                category: cat.category,
-                matrixCategory: cat.matrixCategory,
-                skills: cat.skills.map(skill => ({
-                    name: skill.name,
-                    maxScore: skill.maxScore,
-                    score: 0,
-                    last6MonthsScore: 0,
-                    tasks: []
-                }))
-            })),
-            calculatedData: {}
-        };
-
-        const calculated = calculateSkillScores(newEmployee);
-        calculated.levelData = getLevelAndPMRating(calculated.totalScore);
-        calculated.bestFitRole = determineBestFitRole(newEmployee, calculated);
-        newEmployee.calculatedData = calculated;
-
-        setEmployees(prevEmployees => [...prevEmployees, newEmployee]);
-        alert(`${name} added successfully!`);
-    }, []);
-
-    const updateEmployee = useCallback((updatedEmployee) => {
-        const calculated = calculateSkillScores(updatedEmployee);
-        calculated.levelData = getLevelAndPMRating(calculated.totalScore);
-        calculated.bestFitRole = determineBestFitRole(updatedEmployee, calculated);
-        updatedEmployee.calculatedData = calculated;
-
-        setEmployees(prevEmployees =>
-            prevEmployees.map(emp =>
-                emp.id === updatedEmployee.id ? updatedEmployee : emp
-            )
-        );
-    }, []);
-
-    const deleteEmployee = useCallback((employeeId) => {
-        if (window.confirm(`Are you sure you want to delete this employee?`)) {
-            setEmployees(prevEmployees => prevEmployees.filter(emp => emp.id !== employeeId));
-            if (currentEmployeeId === employeeId) {
-                setCurrentEmployeeId(null);
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            setCurrentUserRole(role); // Set role based on successful login
+            if (role === 'admin') {
                 setCurrentPage('admin');
+            } else {
+                // For employee login, you might want to fetch the specific employee profile linked to this user ID
+                // For this demo, we'll assume the first employee in the list is the one for the employee role.
+                if (employees.length > 0) {
+                    setCurrentEmployeeId(employees[0].id);
+                    setCurrentPage('my-progress');
+                } else {
+                    alert("No employee data available for this user. Please ask an Admin to add your profile.");
+                    setCurrentUserRole(null); // Revert role if no employee data
+                    setCurrentPage('login');
+                }
             }
-            alert('Employee deleted successfully!');
+        } catch (error) {
+            console.error("Login failed:", error.message);
+            alert(`Login failed: ${error.message}`);
+            setCurrentUserRole(null);
+            setCurrentPage('login');
         }
-    }, [currentEmployeeId]);
+    }, [auth, employees]); // Added 'auth' and 'employees' as dependencies
+
+    const handleLogout = useCallback(async () => {
+        try {
+            if (auth) {
+                await signOut(auth);
+            }
+            setCurrentUserRole(null);
+            setCurrentEmployeeId(null);
+            setCurrentPage('login');
+        } catch (error) {
+            console.error("Logout failed:", error.message);
+            alert(`Logout failed: ${error.message}`);
+        }
+    }, [auth]); // Added 'auth' as dependency
+
+    // CRUD Operations using Firestore
+    const addEmployee = useCallback(async (name, role, timeAtRole) => {
+        if (!db || !userId) {
+            alert("Database not ready or user not authenticated.");
+            return;
+        }
+        try {
+            // currentAppId is accessible from the outer scope of SkillTrackerProvider
+            const newEmployeeData = {
+                name: name,
+                role: role,
+                timeAtRole: timeAtRole,
+                totalYearsInCompany: timeAtRole,
+                currentLevel: getLevelAndPMRating(0).level,
+                skills: SKILLS_DATA.map(cat => ({
+                    category: cat.category,
+                    matrixCategory: cat.matrixCategory,
+                    skills: cat.skills.map(skill => ({
+                        name: skill.name,
+                        maxScore: skill.maxScore,
+                        score: 0,
+                        last6MonthsScore: 0,
+                        tasks: []
+                    }))
+                })),
+            };
+            await addDoc(collection(db, `artifacts/${currentAppId}/public/data/employees`), newEmployeeData);
+            alert(`${name} added successfully!`);
+        } catch (e) {
+            console.error("Error adding document: ", e);
+            alert("Error adding employee.");
+        }
+    }, [db, userId, currentAppId]); // Added currentAppId to dependencies
+
+    const updateEmployee = useCallback(async (updatedEmployee) => {
+        if (!db || !userId) {
+            alert("Database not ready or user not authenticated.");
+            return;
+        }
+        try {
+            // currentAppId is accessible from the outer scope of SkillTrackerProvider
+            const { calculatedData, ...dataToSave } = updatedEmployee;
+            await setDoc(doc(db, `artifacts/${currentAppId}/public/data/employees`, updatedEmployee.id), dataToSave);
+            // onSnapshot listener will automatically update the local 'employees' state
+        } catch (e) {
+            console.error("Error updating document: ", e);
+            alert("Error updating employee.");
+        }
+    }, [db, userId, currentAppId]); // Added currentAppId to dependencies
+
+    const deleteEmployee = useCallback(async (employeeId) => {
+        if (!db || !userId) {
+            alert("Database not ready or user not authenticated.");
+            return;
+        }
+        if (window.confirm(`Are you sure you want to delete this employee?`)) {
+            try {
+                // currentAppId is accessible from the outer scope of SkillTrackerProvider
+                await deleteDoc(doc(db, `artifacts/${currentAppId}/public/data/employees`, employeeId));
+                alert('Employee deleted successfully!');
+                // onSnapshot listener will automatically update the local 'employees' state
+                if (currentEmployeeId === employeeId) {
+                    setCurrentEmployeeId(null);
+                    setCurrentPage('admin');
+                }
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+                alert("Error deleting employee.");
+            }
+        }
+    }, [db, userId, currentEmployeeId, currentAppId]); // Added currentAppId to dependencies
 
     const contextValue = {
         currentUserRole,
@@ -414,7 +539,17 @@ const SkillTrackerProvider = ({ children }) => {
         addEmployee,
         updateEmployee,
         deleteEmployee,
+        isAuthReady // Expose auth readiness
     };
+
+    // Only render children when Firebase is initialized and auth state is ready
+    if (!isAuthReady) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                <p className="text-xl text-gray-700">Loading application...</p>
+            </div>
+        );
+    }
 
     return (
         <SkillTrackerContext.Provider value={contextValue}>
@@ -428,6 +563,22 @@ const SkillTrackerProvider = ({ children }) => {
 // LoginPage Component
 const LoginPage = () => {
     const { handleLogin } = useSkillTracker();
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [selectedRole, setSelectedRole] = useState(''); // To hold the role selected by the user
+
+    const handleLoginClick = (role) => {
+        setSelectedRole(role);
+    };
+
+    const handleAuthenticate = (e) => {
+        e.preventDefault();
+        if (username && password && selectedRole) {
+            handleLogin(selectedRole, username, password);
+        } else {
+            alert('Please enter username, password, and select a role.');
+        }
+    };
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
@@ -440,20 +591,74 @@ const LoginPage = () => {
                         Select your role to proceed
                     </p>
                 </div>
-                <div className="flex flex-col space-y-4">
-                    <button
-                        onClick={() => handleLogin('admin')}
-                        className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                    >
-                        Login as Admin
-                    </button>
-                    <button
-                        onClick={() => handleLogin('employee')}
-                        className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-indigo-600 border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                    >
-                        Login as Employee
-                    </button>
-                </div>
+                {!selectedRole ? (
+                    <div className="flex flex-col space-y-4">
+                        <button
+                            onClick={() => handleLoginClick('admin')}
+                            className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                        >
+                            Login as Admin
+                        </button>
+                        <button
+                            onClick={() => handleLoginClick('employee')}
+                            className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-indigo-600 border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                        >
+                            Login as Employee
+                        </button>
+                    </div>
+                ) : (
+                    <form className="mt-8 space-y-6" onSubmit={handleAuthenticate}>
+                        <h3 className="text-center text-xl font-semibold text-gray-800">Login as {selectedRole.charAt(0).toUpperCase() + selectedRole.slice(1)}</h3>
+                        <div className="rounded-md shadow-sm -space-y-px">
+                            <div>
+                                <label htmlFor="username" className="sr-only">Username</label>
+                                <input
+                                    id="username"
+                                    name="username"
+                                    type="email" // Changed to email type for Firebase Auth
+                                    autoComplete="username"
+                                    required
+                                    className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+                                    placeholder="Email Address" // Changed placeholder
+                                    value={username}
+                                    onChange={(e) => setUsername(e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label htmlFor="password" className="sr-only">Password</label>
+                                <input
+                                    id="password"
+                                    name="password"
+                                    type="password"
+                                    autoComplete="current-password"
+                                    required
+                                    className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+                                    placeholder="Password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        <div>
+                            <button
+                                type="submit"
+                                className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                            >
+                                Sign in
+                            </button>
+                        </div>
+                        <div className="text-center">
+                            <button
+                                type="button"
+                                onClick={() => setSelectedRole('')}
+                                className="font-medium text-indigo-600 hover:text-indigo-500"
+                            >
+                                Back to role selection
+                            </button>
+                        </div>
+                    </form>
+                )}
             </div>
         </div>
     );
@@ -983,7 +1188,7 @@ const EmployeeDetail = ({ employee, isAdminContext }) => {
             category.skills.forEach(skill => {
                 labels.push(skill.name);
                 currentScores.push(skill.score);
-                last6MonthsScores.push(skill.last6MonthsScore);
+                last6MonthsScores.push(skill.last6MonthsScore); // Corrected property name
                 maxScores.push(skill.maxScore);
             });
         });
@@ -1573,9 +1778,11 @@ const AppContent = () => {
 
     let employeeToDisplay = null;
     if (currentPage === 'my-progress' && currentUserRole === 'employee') {
-        employeeToDisplay = employees.length > 0 ? employees[0] : null; // Employee views their own data (first employee for now)
+        // In a real app, you'd find the employee linked to the current Firebase user's UID
+        // For this demo, we'll just pick the first employee if the user is an employee.
+        employeeToDisplay = employees.length > 0 ? employees[0] : null; 
     } else if (currentPage === 'employee-detail' && currentUserRole === 'admin' && currentEmployeeId) {
-        employeeToDisplay = employees.find(emp => emp.id === currentEmployeeId); // Admin views selected employee
+        employeeToDisplay = employees.find(emp => emp.id === currentEmployeeId);
     }
 
     if (!currentUserRole) {
